@@ -19,7 +19,7 @@ INTENTS = [
   },
   {
     "topic": "earning_amount",
-    "required_fields": ["name | (workload,incentive_type)","market","segment"],
+    "required_fields": ["name | (workload,incentive_type)","market"],
     "filter_fields": ["name","workload","incentive_type"],
     "answer_fields": ["incentive_market_a","incentive_market_b","maximum_incentive_earning","enterprise_rate","smec_rate"]
   },
