@@ -325,16 +325,26 @@ def field_validator_v1(user_message: str, required_fields: List[str]) -> Dict[st
     branches = _parse_branch(first_expr)      # e.g. [["name"], ["workload","incentive_type"]]
     trailing = [e.strip() for e in required_fields[1:] if e.strip()]  # e.g. ["country","segment"]
 
-    # 3) choose branch deterministically
+    # 3) choose branch deterministically (UPDATED default)
     has_name_branch = any(b == ["name"] for b in branches)
-    has_wk_inc_branch = any(set(b) == {"workload", "incentive_type"} for b in branches)
+    has_wk_inc_branch = any(set(b) == {"workload", "incentive_type"} and len(b) == 2 for b in branches)
 
-    if has_name_branch and name_val:
-        picked = ["name"]
-    elif has_wk_inc_branch and (workload_val and inc_type):
-        picked = ["workload", "incentive_type"]
+    if has_name_branch and has_wk_inc_branch:
+        if name_val:
+            picked = ["name"]
+        elif (workload_val and inc_type):
+            picked = ["workload", "incentive_type"]
+        else:
+            # NEW RULE: when no decisive field is detected, default to workload+incentive_type
+            picked = ["workload", "incentive_type"]
     else:
-        picked = ["name"] if has_name_branch else list(branches[0])
+        # Original behavior when special pair not present
+        if has_name_branch and name_val:
+            picked = ["name"]
+        elif has_wk_inc_branch and (workload_val and inc_type):
+            picked = ["workload", "incentive_type"]
+        else:
+            picked = list(branches[0])
 
     # 4) build required_fields_object (list-or-None discipline)
     rfo: Dict[str, Optional[List[str]]] = {}
