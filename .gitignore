@@ -1,0 +1,72 @@
+# ----- OS junk -----
+.DS_Store
+Thumbs.db
+
+# ----- Python / FastAPI -----
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+.eggs/
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.pytype/
+.pyre/
+.ipynb_checkpoints
+.cache/
+local_settings.py
+instance/
+
+# logs & runtime
+logs/
+*.log
+*.pid
+*.sqlite3
+dump.rdb  # redis dump if created locally
+
+# env files (keep an example committed if you like)
+.env
+.env.*
+!.env.example
+
+# ----- Node / Next.js -----
+node_modules/
+.npm/
+.pnpm-store/
+.next/
+.next/
+.next/cache/
+.next/standalone/
+out/
+coverage/
+*.tsbuildinfo
+.cache/
+
+# lockfiles are usually committed; remove these lines if you DO want them ignored
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# ----- Editors / IDEs -----
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ----- Docker (optional) -----
+# docker-compose.override.yml
+# .env.docker

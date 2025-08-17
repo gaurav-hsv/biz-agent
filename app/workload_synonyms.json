@@ -1,0 +1,98 @@
+{
+  "Dynamics 365 Finance": [
+    "D365 Finance",
+    "Finance",
+    "F&O",
+    "Finance and Operations",
+    "Dynamics Finance"
+  ],
+  "Dynamics 365 Supply Chain Management": [
+    "D365 SCM",
+    "Supply Chain",
+    "SCM",
+    "F&O - SCM"
+  ],
+  "Dynamics 365 Commerce": [
+    "D365 Commerce",
+    "Commerce"
+  ],
+  "Dynamics 365 Human Resources": [
+    "D365 HR",
+    "HR",
+    "Human Resources"
+  ],
+  "Dynamics 365 Project Operations": [
+    "D365 Project Ops",
+    "Project Operations",
+    "ProjOps",
+    "PO"
+  ],
+  "Dynamics 365 Business Central": [
+    "Business Central",
+    "BC",
+    "D365 BC"
+  ],
+  "Dynamics 365 Finance & Supply Chain": [
+    "FSCM",
+    "Finance and Supply Chain",
+    "Finance & SCM",
+    "F&O"
+  ],
+  "Dynamics 365 Sales Enterprise": [
+    "Sales Enterprise",
+    "D365 Sales Ent"
+  ],
+  "Dynamics 365 Sales Premium": [
+    "Sales Premium",
+    "D365 Sales Prem"
+  ],
+  "Dynamics 365 Customer Service Enterprise": [
+    "Customer Service Enterprise",
+    "CS Enterprise",
+    "D365 CSE"
+  ],
+  "Dynamics 365 Customer Service Premium": [
+    "Customer Service Premium",
+    "CS Premium",
+    "D365 CSPrem"
+  ],
+  "Dynamics 365 Field Service": [
+    "Field Service",
+    "FS"
+  ],
+  "Dynamics 365 Customer Insights": [
+    "Customer Insights",
+    "CI",
+    "D365 CI"
+  ],
+  "Dynamics 365 Contact Center": [
+    "Contact Center",
+    "CC"
+  ],
+  "Dynamics 365 Customer Engagement": [
+    "D365 CE",
+    "Customer Engagement",
+    "CRM"
+  ],
+  "Basic Commerce Scale Units (CSU) – 65 Bundle": [
+    "CSU 65",
+    "Basic CSU",
+    "Commerce CSU 65"
+  ],
+  "Standard Commerce Scale Units (CSU) – 225 Bundle": [
+    "CSU 225",
+    "Standard CSU",
+    "Commerce CSU 225"
+  ],
+  "Premium Commerce Scale Units (CSU) – 500 Bundle": [
+    "CSU 500",
+    "Premium CSU",
+    "Commerce CSU 500"
+  ],
+  "Activity & Device": [
+    "Activity and Device"
+  ],
+  "Dynamics 365": [
+    "D365"
+  ]
+}
