@@ -15,30 +15,64 @@ _WL_SYNS_PATH  = os.environ.get("WORKLOAD_SYNS_PATH", os.path.join(_APP_DIR, "wo
 _WL_LIST_PATH  = os.environ.get("WORKLOADS_PATH",      os.path.join(_APP_DIR, "workloads.json"))
 
 # ---------- canonical options ----------
-INCENTIVE_TYPES = ["pre_sales", "post_sales", "csp_transaction"]
+INCENTIVE_TYPES = ["pre_sales", "csp_transaction"]
 SEGMENTS = ["enterprise", "smec"]
+
+_INC_TYPE_SYNS = {
+    "pre_sales": [
+        "funded", "funded engagement", "funded program", "funded offer",
+        "workshop", "immersion", "immersion workshop", "briefing",
+        "envisioning", "assessment", "readiness assessment",
+        "discovery", "scoping session", "poc", "proof of concept", "pilot"
+    ],
+    "csp_transaction": [
+        "csp", "cloud solution provider", "csp transaction",
+        "csp billed", "csp revenue", "csp sale"
+    ],
+}
 
 # ---------- small cleaners / mappers ----------
 def _clean(s: Optional[str]) -> Optional[str]:
     if not isinstance(s, str):
         return None
     s = s.strip().lower()
+    # normalize common variants
+    s = s.replace("&", " and ")
     s = re.sub(r"\s+", " ", s)
-    # normalize dashes/quotes
     s = s.replace("–", "-").replace("—", "-").replace("’", "'").replace("“", '"').replace("”", '"')
     return s
+
 
 def _tokens(s: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", _clean(s) or "")
 
 def _map_incentive_type(text: Optional[str]) -> Optional[str]:
+    """
+    Detect incentive_type as either 'pre_sales' or 'csp_transaction'.
+    """
     t = _clean(text)
     if not t:
         return None
-    if re.search(r"\b(pre[\s\-]?sales?|presales?)\b", t): return "pre_sales"
-    if re.search(r"\b(post[\s\-]?sales?|postsales?)\b", t): return "post_sales"
-    if "csp" in t: return "csp_transaction"
-    if t in INCENTIVE_TYPES: return t
+
+    # 1) synonym/contains/subset check
+    syn_hits = _synonym_candidates(t, _INC_TYPE_SYNS,
+                                   exact_score=100, contains_score=98, token_subset_score=95)
+    if syn_hits:
+        syn_hits.sort(key=lambda x: x[1], reverse=True)
+        top_val, top_score = syn_hits[0]
+        if top_score >= 95:
+            return top_val
+
+    # 2) regex fallback
+    if re.search(r"\b(pre[\s\-]?sales?|presales?)\b", t):
+        return "pre_sales"
+    if "csp" in t:
+        return "csp_transaction"
+
+    # 3) canonical direct
+    if t in INCENTIVE_TYPES:
+        return t
+
     return None
 
 def _map_segment(text: Optional[str]) -> Optional[str]:
@@ -144,7 +178,7 @@ def _fuzzy_candidates(msg: str, choices: List[str],
                       limit: int = 8,
                       token_set_accept: int = 88,
                       partial_accept: int = 86,
-                      cutoff: int = 70) -> List[Tuple[str, int]]:
+                      cutoff: int = 60) -> List[Tuple[str, int]]:
     """
     Use two RapidFuzz scorers and take the better score:
     - token_set_ratio (handles reordering)
@@ -213,18 +247,25 @@ def _resolve_with_syns_and_fuzzy(msg: str,
 
 # ---------- extractors from free text ----------
 def _extract_name(msg: str) -> Dict[str, Any]:
-    """Try synonyms + partial + fuzzy against engagement names."""
     eng_syns, _, _ = _load_syns_and_lists()
     cat = _load_catalog()
-    # Prefer DB names for canonical list (catalog["names"])
-    # If DB is empty, synonyms keys serve as a fallback pool.
-    choices = cat["names"] if cat["names"] else list(eng_syns.keys())
+
+    # Union of DB canonicals and synonym keys to ensure coverage
+    choices = list(cat["names"] or [])
+    if eng_syns:
+        for canon in eng_syns.keys():
+            if canon not in choices:
+                choices.append(canon)
+
+    # Resolve with synonyms + fuzzy. Loosen accept a bit for names.
     res = _resolve_with_syns_and_fuzzy(
-        msg, eng_syns or {}, choices, accept_if_score_ge=88
+        msg, eng_syns or {}, choices, accept_if_score_ge=80
     )
-    # Ensure 'score' for top when value picked (optional)
+
+    # Ensure top candidate present if value chosen
     if res["value"] and (not res["candidates"] or res["candidates"][0]["value"] != res["value"]):
         res["candidates"] = [{"value": res["value"], "score": 100}] + res["candidates"]
+
     return res
 
 def _extract_workload(msg: str) -> Dict[str, Any]:
@@ -302,7 +343,8 @@ def field_validator_v1(user_message: str, required_fields: List[str]) -> Dict[st
     msg = user_message or ""
 
     # 1) extract signals (now synonym + partial + fuzzy aware)
-    name_res = _extract_name(msg)             # {'value'|None,'candidates':[...] }
+    name_res = _extract_name(msg)    
+    print("[FV1] name top3:", name_res.get("candidates", [])[:3])         # {'value'|None,'candidates':[...] }
     workload_res = _extract_workload(msg)     # {'value'|None,'candidates':[...] }
     inc_type = _extract_incentive_type(msg)   # canonical or None
     segment = _extract_segment(msg)           # canonical or None

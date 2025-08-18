@@ -1,7 +1,7 @@
 INTENTS = [
   {
     "topic": "recommend_engagement",
-    "required_fields": ["workload,incentive_type"],
+    "required_fields": ["name | (workload,incentive_type)"],
     "filter_fields": ["name","workload","incentive_type"],
     "answer_fields": ["name","goal"]
   },

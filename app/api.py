@@ -172,22 +172,69 @@ def turn(inp: TurnInput):
             return _make_api_response(s)
 
         # resolve the single field
+        # AFTER
         res = resolve_field_from_message(field, inp.user_message)
         value = res.get("value")
+        cands = res.get("candidates") or []
+        cand_vals = [c.get("value") for c in cands if isinstance(c, dict) and c.get("value")]
+        top_opts = cand_vals[:5] if cand_vals else None
 
         if value is not None:
             rf: Dict[str, Optional[List[str]]] = s.get("required_fields") or {}
             rf[field] = [value]
             s["required_fields"] = rf
+            s["followup"] = None
             save_session(session_id, s)
             s = get_session(session_id) or s
         else:
-            q = generate_followup_question(field_name=field, intent=s.get("last_intent", {}), session=s)
-            s["followup"] = {"question": q, "field_name": field, "options": None}
+            s.setdefault("candidates", {}).setdefault(field, [])
+            s["candidates"][field] = [{"value": v, "score": 92} for v in (top_opts or [])]
+            last_q = (s.get("followup") or {}).get("question")
+            attempt = 1 + int((s.get("asked_log") or {}).get(field, 0))
+            q = generate_followup_question(
+                field_name=field,
+                intent=s.get("last_intent", {}),
+                session=s,
+                attempt_count=attempt,
+                last_question_text=last_q,
+                options=top_opts
+            )
+            (s.setdefault("asked_log", {}))[field] = attempt
+            s["followup"] = {"question": q, "field_name": field, "options": top_opts}
             save_session(session_id, s)
             add_message(session_id, "assistant", q, field)
             s = get_session(session_id) or s
             return _make_api_response(s)
+
+            # q = generate_followup_question(
+            #     field_name=field,
+            #     intent=s.get("last_intent", {}),
+            #     session=s,
+            #     options=top_opts  # <-- pass options to shape the prompt/UX
+            # )
+            # s["followup"] = {"question": q, "field_name": field, "options": top_opts}
+            # s.setdefault("resolver_candidates", {})[field] = cands
+            # save_session(session_id, s)
+            # add_message(session_id, "assistant", q, field)
+            # s = get_session(session_id) or s
+            # return _make_api_response(s)
+
+        # res = resolve_field_from_message(field, inp.user_message)
+        # value = res.get("value")
+
+        # if value is not None:
+        #     rf: Dict[str, Optional[List[str]]] = s.get("required_fields") or {}
+        #     rf[field] = [value]
+        #     s["required_fields"] = rf
+        #     save_session(session_id, s)
+        #     s = get_session(session_id) or s
+        # else:
+        #     q = generate_followup_question(field_name=field, intent=s.get("last_intent", {}), session=s)
+        #     s["followup"] = {"question": q, "field_name": field, "options": None}
+        #     save_session(session_id, s)
+        #     add_message(session_id, "assistant", q, field)
+        #     s = get_session(session_id) or s
+        #     return _make_api_response(s)
 
         # after filling current field, check missing
         intent_obj = (s.get("last_intent") or {}).get("intent") or {}

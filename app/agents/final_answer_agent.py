@@ -33,7 +33,7 @@ Do NOT use or mention segment. For market, do NOT use it as a filter; mention A/
 
 ROUTING HINTS (for understanding the ask)
 - Mentions like activity, deliverable, module, requirement → activity_requirement
-- eligibility, qualification, ACV, MSX, MCEM, stage, status → customer_qualification
+- eligibility, qualification, stage, status → customer_qualification
 - partner qualification, specialization, designation → partner_qualification
 - goal, purpose, outcome, objective → goal
 - workload, product, in scope, SKU → workload
@@ -106,7 +106,7 @@ def _fallback_answer(original_user_message: str,
         name = row.get("name") or "this engagement"
         recs: List[str] = []
         if row.get("customer_qualification"):
-            recs.append("Can you confirm the opportunity meets the customer qualifications (e.g., ACV and stage)?")
+            recs.append("Can you confirm the opportunity meets the customer qualifications?")
         if any(k in row for k in ("market_a_definition", "market_b_definition", "market_c_definition")):
             recs.append("Can you tell me which market band applies to your customer (A, B, or C)?")
         if row.get("activity_requirement"):
@@ -189,7 +189,7 @@ def generate_final_answer(original_user_message: str,
         "recommendations": List[str]  # >= 3 items, phrased as user questions
       }
     """
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
     msgs = [
         {"role": "system", "content": SYSTEM},

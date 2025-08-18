@@ -33,8 +33,21 @@ _WL_SYNS_PATH = os.environ.get("WORKLOAD_SYNS_PATH", os.path.join(_APP_DIR, "wor
 _WL_LIST_PATH = os.environ.get("WORKLOADS_PATH",     os.path.join(_APP_DIR, "workloads.json"))
 
 # ---------- static canonical options ----------
-INCENTIVE_TYPES = ["pre_sales", "post_sales", "csp_transaction"]
+INCENTIVE_TYPES = ["pre_sales", "csp_transaction"]
 SEGMENTS = ["enterprise", "smec"]
+
+_INC_TYPE_SYNS = {
+    "pre_sales": [
+        "funded", "funded engagement", "funded program", "funded offer",
+        "workshop", "immersion", "immersion workshop", "briefing",
+        "envisioning", "assessment", "readiness assessment",
+        "discovery", "scoping session", "poc", "proof of concept", "pilot"
+    ],
+    "csp_transaction": [
+        "csp", "cloud solution provider", "csp transaction",
+        "csp billed", "csp revenue", "csp sale"
+    ],
+}
 
 
 # ---------- utils ----------
@@ -42,6 +55,7 @@ def _clean(s: Optional[str]) -> str:
     if not isinstance(s, str):
         return ""
     s = s.strip().lower()
+    s = s.replace("&", " and ")
     s = re.sub(r"\s+", " ", s)
     return (
         s.replace("–", "-")
@@ -50,6 +64,7 @@ def _clean(s: Optional[str]) -> str:
          .replace("“", '"')
          .replace("”", '"')
     )
+
 
 
 def _tokens(s: str) -> List[str]:
@@ -115,7 +130,7 @@ def _fuzzy_hits(
     msg: str,
     choices: List[str],
     limit: int = 8,
-    cutoff: int = 70
+    cutoff: int = 60
 ) -> List[Tuple[str, int]]:
     """
     Combine token_set_ratio and partial_ratio. Keep the best score per original choice.
@@ -152,16 +167,18 @@ def _map_incentive_type(text: Optional[str]) -> Optional[str]:
     t = _clean(text)
     if not t:
         return None
-    if re.search(r"\b(pre[\s\-]?sales?|presales?)\b", t):
-        return "pre_sales"
-    if re.search(r"\b(post[\s\-]?sales?|postsales?)\b", t):
-        return "post_sales"
-    if "csp" in t:
-        return "csp_transaction"
-    if t in INCENTIVE_TYPES:
-        return t
+    # synonyms first
+    for canon, alts in _INC_TYPE_SYNS.items():
+        for a in alts:
+            a_clean = _clean(a)
+            if a_clean and (a_clean in t or t in a_clean):
+                return canon
+    # regex fallback
+    if re.search(r"\b(pre[\s\-]?sales?|presales?)\b", t): return "pre_sales"
+    if "csp" in t: return "csp_transaction"
+    # canonical direct
+    if t in INCENTIVE_TYPES: return t
     return None
-
 
 def _map_segment(text: Optional[str]) -> Optional[str]:
     t = _clean(text)
@@ -177,11 +194,44 @@ def _map_segment(text: Optional[str]) -> Optional[str]:
 
 
 def _resolve_workload(text: str) -> Dict[str, Any]:
-    syn_hits = _synonym_hits(text, _WL_SYNS or {})
-    fuzzy = _fuzzy_hits(text, _WL_LIST or [])
-    cands = _rank_unique(syn_hits + fuzzy, top=5)
-    value = cands[0]["value"] if cands and cands[0]["score"] >= 85 else None
-    return {"value": value, "candidates": cands}
+    """
+    Returns a confident value when clearly specific;
+    otherwise returns value=None with disambiguation candidates.
+    """
+    msg = text or ""
+    syn_hits = _synonym_hits(msg, _WL_SYNS or {})
+    fuzzy = _fuzzy_hits(msg, _WL_LIST or [])
+
+    # Merge + rank
+    cands = _rank_unique(syn_hits + fuzzy, top=8)
+
+    if not cands:
+        return {"value": None, "candidates": []}
+
+    # --- Decision bands ---
+    top = cands[0]
+    top_score = top["score"]
+
+    # 1) High confidence → auto-select
+    if top_score >= 90:
+        return {"value": top["value"], "candidates": cands}
+
+    # 2) Ambiguous if there are multiple near-ties within a small delta
+    #    or if many plausible candidates exist (generic phrasing like "dynamics", "power", etc.)
+    near_ties = [c for c in cands if (top_score - c["score"]) <= 5]
+    plausible = [c for c in cands if c["score"] >= 80]
+
+    if len(near_ties) >= 2 or len(plausible) >= 3:
+        # Don’t pick; let the UI render options (prevents loops)
+        return {"value": None, "candidates": cands[:5]}
+
+    # 3) Medium confidence (80–89) with no near-ties → pick
+    if top_score >= 80:
+        return {"value": top["value"], "candidates": cands}
+
+    # 4) Low confidence → ask with options
+    return {"value": None, "candidates": cands[:5]}
+
 
 
 # ---------- market (country) via LLM + ISO validation ----------

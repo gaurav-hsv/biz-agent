@@ -76,23 +76,23 @@ def _decanonicalize_text(txt: str) -> str:
 def _build_hints(field_name: str, session: Dict[str, Any], options: Optional[List[str]]) -> Dict[str, Any]:
     hints: Dict[str, Any] = {}
 
-    # Provide HUMAN-FRIENDLY allowed values (never snake_case)
     if field_name == "incentive_type":
         hints["allowed_values"] = _humanize_list(field_name, INCENTIVE_TYPES)
     elif field_name == "segment":
         hints["allowed_values"] = _humanize_list(field_name, SEGMENTS)
 
-    # pass candidates (values only) in humanized form
+    # candidates persisted by caller
     cands = (session.get("candidates") or {}).get(field_name) or []
     cand_vals = [c.get("value") for c in cands if isinstance(c, dict) and c.get("value")]
+
+    # UI-provided options (explicit) OR fall back to followup.options
+    opt_vals = options or (session.get("followup") or {}).get("options") or []
+
+    if opt_vals:
+        hints["options"] = _humanize_list(field_name, opt_vals[:5])
     if cand_vals:
         hints["candidate_values"] = _humanize_list(field_name, cand_vals[:5])
 
-    # UI-provided options (e.g., from fuzzy matches) — humanized
-    if options:
-        hints["options"] = _humanize_list(field_name, options[:5])
-
-    # current partial value if any — humanized
     cur = (session.get("required_fields") or {}).get(field_name)
     if isinstance(cur, list) and cur:
         hints["current_value"] = _humanize_list(field_name, cur)
