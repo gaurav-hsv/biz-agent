@@ -36,6 +36,7 @@ _SUFFIX_MULT = {
     "k": 1_000,
     "m": 1_000_000,
     "b": 1_000_000_000,
+    "bn": 1_000_000_000,
     "l": 100_000,
     "lac": 100_000,
     "lakh": 100_000,
@@ -49,7 +50,6 @@ def _normalize_number_str(x: float) -> str:
         return str(int(x))
     s = f"{x:.6f}".rstrip("0").rstrip(".")
     return s if s else "0"
-
 def _extract_acv_value(msg: str) -> Optional[str]:
     """
     Parse ACV from free text.
@@ -62,19 +62,17 @@ def _extract_acv_value(msg: str) -> Optional[str]:
         return None
     text = msg
 
-    # find candidates like: $ 1,20,000 cr etc. (currency ignored)
     rx = re.compile(
         r"(?i)(?:[$₹€£]\s*)?"
         r"(?P<num>\d{1,3}(?:[,\s]?\d{2,3})+|\d+(?:\.\d+)?)"
-        r"\s*(?P<suf>k|m|b|l|lac|lakh|cr|crore)?"
+        r"\s*(?P<suf>k|m|bn|b|l|lac|lakh|cr|crore)?"
         r"(?:\s*(usd|inr|eur|gbp))?"
     )
 
-    hits: List[Tuple[float, int]] = []  # (value, start_index)
+    hits: List[Tuple[float, int]] = []
     for m in rx.finditer(text):
         raw = m.group("num") or ""
         suf = (m.group("suf") or "").lower()
-        # remove commas/spaces in number
         n = re.sub(r"[,\s]", "", raw)
         try:
             val = float(n)
@@ -82,21 +80,17 @@ def _extract_acv_value(msg: str) -> Optional[str]:
             continue
         if suf in _SUFFIX_MULT:
             val *= _SUFFIX_MULT[suf]
-        # keep zero as valid
         hits.append((val, m.start()))
 
     if not hits:
         return None
 
-    # prefer one close to ACV-ish keywords; else largest numeric
     ctx_rx = re.compile(r"(?i)\b(acv|annual|contract|deal|oppty|opportunity|value|revenue)\b")
     ctx_pos = [m.start() for m in ctx_rx.finditer(text)]
-    chosen: Optional[float] = None
     if ctx_pos:
-        # choose candidate with smallest distance to any context position
-        def dist(score_pair: Tuple[float, int]) -> int:
-            _, pos = score_pair
-            return min(abs(pos - cp) for cp in ctx_pos) if ctx_pos else 10**9
+        def dist(p: Tuple[float, int]) -> int:
+            _, pos = p
+            return min(abs(pos - cp) for cp in ctx_pos)
         hits.sort(key=lambda p: (dist(p), -p[0]))
         chosen = hits[0][0]
     else:
@@ -104,20 +98,23 @@ def _extract_acv_value(msg: str) -> Optional[str]:
 
     return _normalize_number_str(chosen)
 
+# Accepts: 10h, 8 hr, 7.5 hours, and also bare "10"
+_HOURS_RX = re.compile(r"(?i)(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b")
+
 def _extract_hours_value(msg: str) -> Optional[str]:
-    """
-    Parse hours from free text.
-    - Requires hour unit (h|hr|hrs|hour|hours).
-    - If multiple, take the last one.
-    - Returns normalized numeric string like "10" or "7.5".
-    """
     if not msg:
         return None
-    rxh = re.compile(r"(?i)(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b")
     last = None
-    for m in rxh.finditer(msg):
+    for m in _HOURS_RX.finditer(msg):
         last = m.group(1)
-    return last
+    if last is not None:
+        f = float(last)
+        return str(int(f)) if abs(f - round(f)) < 1e-9 else str(f)
+    m2 = re.search(r"(?<!\d)(\d{1,4}(?:\.\d+)?)(?!\d)", msg)
+    if not m2:
+        return None
+    f = float(m2.group(1))
+    return str(int(f)) if abs(f - round(f)) < 1e-9 else str(f)
 
 
 # ---------- small cleaners / mappers ----------
