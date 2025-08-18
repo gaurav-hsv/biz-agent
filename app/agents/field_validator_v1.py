@@ -31,6 +31,95 @@ _INC_TYPE_SYNS = {
     ],
 }
 
+# ---------- numeric value extractors (simple value only) ----------
+_SUFFIX_MULT = {
+    "k": 1_000,
+    "m": 1_000_000,
+    "b": 1_000_000_000,
+    "l": 100_000,
+    "lac": 100_000,
+    "lakh": 100_000,
+    "cr": 10_000_000,
+    "crore": 10_000_000,
+}
+
+def _normalize_number_str(x: float) -> str:
+    # stringify without scientific notation; drop trailing .0
+    if int(x) == x:
+        return str(int(x))
+    s = f"{x:.6f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+def _extract_acv_value(msg: str) -> Optional[str]:
+    """
+    Parse ACV from free text.
+    - Accepts plain numbers, 1,20,000 style, decimals, and k/m/b/lac/lakh/cr/crore suffixes.
+    - Ignores currency (always treat as USD downstream).
+    - If multiple numbers: prefer one near ACV-ish keywords else pick the largest.
+    - Returns normalized numeric string (e.g., "120000") or None.
+    """
+    if not msg:
+        return None
+    text = msg
+
+    # find candidates like: $ 1,20,000 cr etc. (currency ignored)
+    rx = re.compile(
+        r"(?i)(?:[$₹€£]\s*)?"
+        r"(?P<num>\d{1,3}(?:[,\s]?\d{2,3})+|\d+(?:\.\d+)?)"
+        r"\s*(?P<suf>k|m|b|l|lac|lakh|cr|crore)?"
+        r"(?:\s*(usd|inr|eur|gbp))?"
+    )
+
+    hits: List[Tuple[float, int]] = []  # (value, start_index)
+    for m in rx.finditer(text):
+        raw = m.group("num") or ""
+        suf = (m.group("suf") or "").lower()
+        # remove commas/spaces in number
+        n = re.sub(r"[,\s]", "", raw)
+        try:
+            val = float(n)
+        except Exception:
+            continue
+        if suf in _SUFFIX_MULT:
+            val *= _SUFFIX_MULT[suf]
+        # keep zero as valid
+        hits.append((val, m.start()))
+
+    if not hits:
+        return None
+
+    # prefer one close to ACV-ish keywords; else largest numeric
+    ctx_rx = re.compile(r"(?i)\b(acv|annual|contract|deal|oppty|opportunity|value|revenue)\b")
+    ctx_pos = [m.start() for m in ctx_rx.finditer(text)]
+    chosen: Optional[float] = None
+    if ctx_pos:
+        # choose candidate with smallest distance to any context position
+        def dist(score_pair: Tuple[float, int]) -> int:
+            _, pos = score_pair
+            return min(abs(pos - cp) for cp in ctx_pos) if ctx_pos else 10**9
+        hits.sort(key=lambda p: (dist(p), -p[0]))
+        chosen = hits[0][0]
+    else:
+        chosen = max(hits, key=lambda p: p[0])[0]
+
+    return _normalize_number_str(chosen)
+
+def _extract_hours_value(msg: str) -> Optional[str]:
+    """
+    Parse hours from free text.
+    - Requires hour unit (h|hr|hrs|hour|hours).
+    - If multiple, take the last one.
+    - Returns normalized numeric string like "10" or "7.5".
+    """
+    if not msg:
+        return None
+    rxh = re.compile(r"(?i)(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b")
+    last = None
+    for m in rxh.finditer(msg):
+        last = m.group(1)
+    return last
+
+
 # ---------- small cleaners / mappers ----------
 def _clean(s: Optional[str]) -> Optional[str]:
     if not isinstance(s, str):
@@ -344,11 +433,12 @@ def field_validator_v1(user_message: str, required_fields: List[str]) -> Dict[st
 
     # 1) extract signals (now synonym + partial + fuzzy aware)
     name_res = _extract_name(msg)    
-    print("[FV1] name top3:", name_res.get("candidates", [])[:3])         # {'value'|None,'candidates':[...] }
-    workload_res = _extract_workload(msg)     # {'value'|None,'candidates':[...] }
-    inc_type = _extract_incentive_type(msg)   # canonical or None
-    segment = _extract_segment(msg)           # canonical or None
-    country = _extract_country(msg)           # None in v1
+    workload_res = _extract_workload(msg)     
+    inc_type = _extract_incentive_type(msg)  
+    segment = _extract_segment(msg)           
+    country = _extract_country(msg)         
+    acv_val = _extract_acv_value(msg)      
+    hours_val = _extract_hours_value(msg)
 
     name_val = [name_res["value"]] if name_res.get("value") else None
     workload_val = [workload_res["value"]] if workload_res.get("value") else None
@@ -396,12 +486,20 @@ def field_validator_v1(user_message: str, required_fields: List[str]) -> Dict[st
         rfo["workload"] = workload_val
     if "incentive_type" in picked:
         rfo["incentive_type"] = [inc_type] if inc_type else None
+    if "acv" in picked:
+        rfo["acv"] = [acv_val] if acv_val is not None else None
+    if "hours" in picked:
+        rfo["hours"] = [hours_val] if hours_val is not None else None
 
     for f in trailing:
         if f == "country":
             rfo["country"] = [country] if country else None
         elif f == "segment":
             rfo["segment"] = [segment] if segment else None
+        elif f == "acv":
+            rfo["acv"] = [acv_val] if acv_val is not None else None
+        elif f == "hours":
+            rfo["hours"] = [hours_val] if hours_val is not None else None
         else:
             rfo[f] = None
 

@@ -5,15 +5,17 @@ Single-field resolver.
 
 Given (field_name, user_message) it returns a canonical value (or None) and optional candidates.
 - workload: synonyms + partial + fuzzy over canonical list (workloads.json + your DB, if you merge upstream)
-- incentive_type: regex/keyword canonicalization -> {'pre_sales','post_sales','csp_transaction'}
+- incentive_type: regex/keyword canonicalization -> {'pre_sales','csp_transaction'}
 - segment: regex/keyword canonicalization -> {'enterprise','smec'}
-- market: LLM extracts ONE country; we validate against ISO-3166 using pycountry (no local JSON)
+- country: LLM extracts ONE country; we validate against ISO-3166 using pycountry (no local JSON)
+- acv: parse numeric value from free text (supports 10k / 1.2m / 2 cr / 3 lakh / 1,20,000 etc.); return normalized string
+- hours: parse numeric hours with unit (e.g., 8h, 7.5 hours); return normalized string
 
 Return shape:
 {
   "field_name": "<input field>",
   "value": "<canonical or None>",
-  "candidates": [ { "value": str, "score": int }, ... ]  # empty for market
+  "candidates": [ { "value": str, "score": int }, ... ]  # empty for country/acv/hours
 }
 """
 
@@ -64,7 +66,6 @@ def _clean(s: Optional[str]) -> str:
          .replace("“", '"')
          .replace("”", '"')
     )
-
 
 
 def _tokens(s: str) -> List[str]:
@@ -180,6 +181,7 @@ def _map_incentive_type(text: Optional[str]) -> Optional[str]:
     if t in INCENTIVE_TYPES: return t
     return None
 
+
 def _map_segment(text: Optional[str]) -> Optional[str]:
     t = _clean(text)
     if not t:
@@ -233,8 +235,7 @@ def _resolve_workload(text: str) -> Dict[str, Any]:
     return {"value": None, "candidates": cands[:5]}
 
 
-
-# ---------- market (country) via LLM + ISO validation ----------
+# ---------- country via LLM + ISO validation ----------
 _MARKET_SYSTEM = (
     'Extract exactly one sovereign country (ISO 3166-1 English short name). '
     'If none is present, return {"country": null}. '
@@ -284,20 +285,105 @@ def _validate_country_iso(value: Optional[str]) -> Optional[str]:
     return None
 
 
+# ---------- numeric value extractors (simple value only) ----------
+_SUFFIX_MULT = {
+    "k": 1_000,
+    "m": 1_000_000,
+    "b": 1_000_000_000,
+    "l": 100_000,
+    "lac": 100_000,
+    "lakh": 100_000,
+    "cr": 10_000_000,
+    "crore": 10_000_000,
+}
+
+def _normalize_number_str(x: float) -> str:
+    # stringify without scientific notation; drop trailing .0
+    if int(x) == x:
+        return str(int(x))
+    s = f"{x:.6f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+def _extract_acv_value(msg: str) -> Optional[str]:
+    """
+    Parse ACV from free text.
+    - Accepts plain numbers, 1,20,000 style, decimals, and k/m/b/lac/lakh/cr/crore suffixes.
+    - Ignores currency (we map to USD downstream).
+    - If multiple numbers: prefer one near ACV-ish keywords else pick the largest.
+    - Returns normalized numeric string (e.g., "120000") or None.
+    """
+    if not msg:
+        return None
+    text = msg
+
+    rx = re.compile(
+        r"(?i)(?:[$₹€£]\s*)?"
+        r"(?P<num>\d{1,3}(?:[,\s]?\d{2,3})+|\d+(?:\.\d+)?)"
+        r"\s*(?P{suf}suf|k|m|b|l|lac|lakh|cr|crore)?"
+        r"(?:\s*(usd|inr|eur|gbp))?"
+        .replace("{suf}", "")  # keep the group named 'suf'
+    )
+
+    hits: List[Tuple[float, int]] = []  # (value, start_index)
+    for m in rx.finditer(text):
+        raw = m.group("num") or ""
+        suf = (m.group("suf") or "").lower()
+        n = re.sub(r"[,\s]", "", raw)
+        try:
+            val = float(n)
+        except Exception:
+            continue
+        if suf in _SUFFIX_MULT:
+            val *= _SUFFIX_MULT[suf]
+        hits.append((val, m.start()))
+
+    if not hits:
+        return None
+
+    # prefer near ACV context, else largest value
+    ctx_rx = re.compile(r"(?i)\b(acv|annual|contract|deal|oppty|opportunity|value|revenue)\b")
+    ctx_pos = [m.start() for m in ctx_rx.finditer(text)]
+    if ctx_pos:
+        def dist(p: Tuple[float, int]) -> int:
+            _, pos = p
+            return min(abs(pos - cp) for cp in ctx_pos)
+        hits.sort(key=lambda p: (dist(p), -p[0]))
+        chosen = hits[0][0]
+    else:
+        chosen = max(hits, key=lambda p: p[0])[0]
+
+    return _normalize_number_str(chosen)
+
+def _extract_hours_value(msg: str) -> Optional[str]:
+    """
+    Parse hours from free text.
+    - Requires hour unit (h|hr|hrs|hour|hours).
+    - If multiple, take the last one.
+    - Returns normalized numeric string like "10" or "7.5".
+    """
+    if not msg:
+        return None
+    rxh = re.compile(r"(?i)(\d+(?:\.\d+)?)\s*(h|hr|hrs|hour|hours)\b")
+    last = None
+    for m in rxh.finditer(msg):
+        last = m.group(1)
+    return last
+
+
 # ---------- public API ----------
 def resolve_field_from_message(field_name: str, user_message: str) -> Dict[str, Any]:
     """
     Resolve a SINGLE field from a fresh user message.
 
     Args:
-      field_name: one of {"workload","incentive_type","segment","market"}
+      field_name: one of {"workload","incentive_type","segment","country","acv","hours"}
       user_message: raw user text
 
     Returns:
       {
         "field_name": "<input field>",
         "value": "<canonical or None>",
-        "candidates": [ { "value": str, "score": int }, ... ]  # empty for market
+        "candidates": [ { "value": str, "score": int }, ... ]  # empty for country/acv/hours
       }
     """
     f = (field_name or "").strip().lower()
@@ -309,7 +395,6 @@ def resolve_field_from_message(field_name: str, user_message: str) -> Dict[str, 
 
     if f == "incentive_type":
         v = _map_incentive_type(msg)
-        # Provide static candidates if unresolved, helpful for UI
         cands = (
             [{"value": v, "score": 100}]
             if v
@@ -326,11 +411,18 @@ def resolve_field_from_message(field_name: str, user_message: str) -> Dict[str, 
         )
         return {"field_name": field_name, "value": v, "candidates": cands}
 
-    if f == "market":
-        # LLM extraction → strict ISO validation
+    if f == "country":
         candidate = _extract_country_with_llm(msg)
         valid = _validate_country_iso(candidate)
         return {"field_name": field_name, "value": valid, "candidates": []}
+
+    if f == "acv":
+        v = _extract_acv_value(msg)  # normalized numeric string or None
+        return {"field_name": field_name, "value": v, "candidates": []}
+
+    if f == "hours":
+        v = _extract_hours_value(msg)  # normalized numeric string or None
+        return {"field_name": field_name, "value": v, "candidates": []}
 
     # Unknown field → None
     return {"field_name": field_name, "value": None, "candidates": []}

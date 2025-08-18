@@ -4,8 +4,110 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, List
+import math
 
 from langchain_openai import ChatOpenAI
+
+def _one(v):
+    if isinstance(v, list) and v: return v[0]
+    return v
+
+def _to_float(v):
+    if v is None: return None
+    if isinstance(v, (int, float)): return float(v)
+    s = str(v).strip().lower().replace(",", "")
+    # support 10k / 100k / 1m style
+    m = re.fullmatch(r"([0-9]*\.?[0-9]+)\s*([kKmM]?)", s)
+    if not m:
+        # last fallback: digits only
+        try: return float(re.sub(r"[^0-9.\-]", "", s))
+        except: return None
+    num = float(m.group(1))
+    suf = m.group(2)
+    if suf in ("k","K"): num *= 1_000
+    elif suf in ("m","M"): num *= 1_000_000
+    return float(num)
+
+def _norm_country(s):
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+def _country_in_def(country, definition_text):
+    if not country or not definition_text: return False
+    c = _norm_country(country)
+    # split by comma/“and”/semicolon/slash
+    tokens = [t.strip() for t in re.split(r",|;|/|\band\b", definition_text) if t.strip()]
+    for t in tokens:
+        if _norm_country(t) == c:
+            return True
+    # also allow word-boundary substring match as a safety net
+    return re.search(rf"\b{re.escape(country)}\b", definition_text, flags=re.IGNORECASE) is not None
+
+def _pick_band(row, country):
+    if _country_in_def(country, row.get("market_a_definition")): return "A"
+    if _country_in_def(country, row.get("market_b_definition")): return "B"
+    return "C"
+
+def _compute_presales_payout(row, country, acv, hours):
+    """Returns a dict with band, inputs, candidates and final payout (or can_compute=False)."""
+    band = _pick_band(row, country)
+    key = band.lower()
+
+    percent = row.get(f"incentive_market_{key}")         # e.g., 7.5
+    hourly = row.get(f"workshop_rate_hourly_{key}")      # e.g., 163
+    cap    = row.get("maximum_incentive_earning")        # e.g., 6000
+
+    acv_f   = _to_float(acv)
+    hours_f = _to_float(hours)
+
+    candidates = []
+
+    if percent is not None and acv_f is not None:
+        candidates.append(("percent_of_acv", float(percent) / 100.0 * acv_f))
+    if hourly is not None and hours_f is not None:
+        candidates.append(("hours_x_rate", float(hourly) * hours_f))
+    if cap is not None:
+        candidates.append(("cap", float(cap)))
+
+    if not candidates:
+        return {"can_compute": False, "reason": "Missing inputs/fields", "band": band}
+
+    winner = min(candidates, key=lambda kv: kv[1])
+    out = {
+        "can_compute": True,
+        "band": band,
+        "inputs": {
+            "country": country,
+            "acv": acv_f,
+            "hours": hours_f,
+            "percent": percent,
+            "hourly_rate": hourly,
+            "cap": cap,
+        },
+        "candidates": {k: v for k, v in candidates},
+        "payout": winner[1],
+        "limiter": winner[0],
+    }
+    return out
+
+def precompute_calcs(required_fields, rows):
+    """Build PRECOMPUTED_CALC for the LLM. One entry per row."""
+    country = _one((required_fields or {}).get("country"))
+    acv     = _one((required_fields or {}).get("acv"))
+    hours   = _one((required_fields or {}).get("hours"))
+
+    out = []
+    for r in (rows or []):
+        calc = _compute_presales_payout(r, country, acv, hours)
+        out.append({
+            "name": r.get("name"),
+            "band": calc.get("band"),
+            "can_compute": calc.get("can_compute", False),
+            "inputs": calc.get("inputs"),
+            "candidates": calc.get("candidates"),
+            "payout": calc.get("payout"),
+            "limiter": calc.get("limiter"),
+        })
+    return out
 
 
 SYSTEM = """You are the Final Answer generator for a BizApps incentives assistant.
@@ -48,6 +150,12 @@ ROW SELECTION (apply in order)
   3) Show a succinct comparison of top 1–3 rows only.
 - If duplicate names appear, collapse to a single item.
 
+CALCULATIONS
+- If PRECOMPUTED_CALC is present, USE THOSE NUMBERS AS-IS (do not recompute).
+- Each entry includes: band (A/B/C), candidates used, limiter, and payout (if computable).
+- If none are computable, say the calculation cannot be completed from the catalog and name the missing inputs.
+- When computable, state the band used and a one-line breakdown of the compared terms (percent-of-ACV, hours×rate, cap), then the final payout = minimum.
+
 FORMATTING RULES (paraphrase, don’t paste)
 - Paraphrase long cell text into human-readable language. Do NOT dump raw text from the cell.
 - Preserve key numbers/terms verbatim (e.g., $50k, MSX, MCEM “Inspire & Design”).
@@ -75,6 +183,9 @@ REQUIRED_FIELDS (fully resolved):
 
 FILTER_RESULT_ROWS (use ONLY these rows):
 {filter_result_json}
+
+PRECOMPUTED_CALC (use these numbers as-is; do not recompute):
+{precomputed_calc_json}
 
 TASK
 1) Identify what the user actually asked for (e.g., activity requirements, partner qualification, customer eligibility, payout, goal, workloads, or a general eligibility question).
@@ -186,11 +297,13 @@ def generate_final_answer(original_user_message: str,
     Returns:
       {
         "answer_text": str,
-        "recommendations": List[str]  # >= 3 items, phrased as user questions
+        "recommendations": List[str]
       }
     """
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    # Precompute deterministic payout math so the LLM only narrates
+    precomp = precompute_calcs(required_fields or {}, filter_result or [])
 
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
     msgs = [
         {"role": "system", "content": SYSTEM},
         {
@@ -199,6 +312,7 @@ def generate_final_answer(original_user_message: str,
                 original_user_message=original_user_message,
                 required_fields_json=_safe_json(required_fields or {}),
                 filter_result_json=_safe_json(filter_result or []),
+                precomputed_calc_json=_safe_json(precomp or []),
             ),
         },
     ]
@@ -215,16 +329,12 @@ def generate_final_answer(original_user_message: str,
             fb["recommendations"] = _normalize_recommendations(fb.get("recommendations") or [])
             return fb
 
-        # normalize recommendations → user questions
         if not isinstance(recs, list) or not recs:
             fb = _fallback_answer(original_user_message, required_fields, filter_result)
             recs = fb.get("recommendations") or []
         norm_recs = _normalize_recommendations(recs)
 
-        return {
-            "answer_text": answer.strip(),
-            "recommendations": norm_recs
-        }
+        return {"answer_text": answer.strip(), "recommendations": norm_recs}
     except Exception:
         fb = _fallback_answer(original_user_message, required_fields, filter_result)
         fb["recommendations"] = _normalize_recommendations(fb.get("recommendations") or [])
