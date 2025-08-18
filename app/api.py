@@ -4,7 +4,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import uuid
-
+from app.agents.router import route_message
+from app.agents.docqa_agent import docqa_turn as _docqa_turn
 from app.agents.final_answer_agent import generate_final_answer
 from app.agents.continuation_agent import detect_continuation  # continuation check
 from app.session import get_session, create_session, save_session, add_message
@@ -150,10 +151,20 @@ def _is_followup_turn(inp: TurnInput) -> bool:
 def _pick_field_name(inp: TurnInput) -> Optional[str]:
     return (inp.current_field or inp.current_field_name or None)
 
+def _set_active_question(s: Dict[str, Any], route: str, text: str) -> Dict[str, Any]:
+    aq = s.setdefault("active_questions", {})
+    aq[route] = (text or "").strip()
+    s["last_path"] = route
+    return s
+
+def _get_active_question(s: Dict[str, Any], route: str, fallback: str = "") -> str:
+    return ((s.get("active_questions") or {}).get(route) or fallback or "").strip()
+
+
 # ---------------- route ----------------
 @router.post("/message")
 def turn(inp: TurnInput):
-    # ensure session
+    # ---------------- Session bootstrap ----------------
     session_id = inp.session_id
     s = get_session(session_id) if session_id else None
     if not s:
@@ -161,18 +172,44 @@ def turn(inp: TurnInput):
         s = create_session(session_id, inp.user_message)
         save_session(session_id, s)
 
-    # ---- FOLLOWUP TURN ------------------------------------------------------
-    if _is_followup_turn(inp):
+    # ---------------- Helper locals ----------------
+    def _append_user_message():
         add_message(session_id, "user", inp.user_message, _pick_field_name(inp))
+
+    # ---------------- FOLLOW-UP TURN ----------------
+    if _is_followup_turn(inp):
+        _append_user_message()
         s = get_session(session_id) or s
 
         field = (_pick_field_name(inp) or "").strip()
         if not field:
+            # nothing to resolve; return current state
             s = get_session(session_id) or s
             return _make_api_response(s)
 
-        # resolve the single field
-        # AFTER
+        # ---- Doc-QA escape hatch on follow-up ----
+        try:
+            _r = route_message(inp.user_message, s)
+            s["last_route_decision"] = _r
+            save_session(session_id, s)
+            s = get_session(session_id) or s
+
+            if _r["route"] == "doc_qa":
+                s["followup"] = None
+                s = _set_active_question(s, "doc_qa", inp.user_message)
+                save_session(session_id, s)
+                s = get_session(session_id) or s
+
+                s = _docqa_turn(inp.user_message, s)
+                s["last_path"] = "doc_qa"
+                save_session(session_id, s)
+                s = get_session(session_id) or s
+                return _make_api_response(s)
+        except Exception:
+            # router failed -> continue with incentive field resolution
+            pass
+
+        # ---- Resolve field from follow-up message ----
         res = resolve_field_from_message(field, inp.user_message)
         value = res.get("value")
         cands = res.get("candidates") or []
@@ -206,37 +243,7 @@ def turn(inp: TurnInput):
             s = get_session(session_id) or s
             return _make_api_response(s)
 
-            # q = generate_followup_question(
-            #     field_name=field,
-            #     intent=s.get("last_intent", {}),
-            #     session=s,
-            #     options=top_opts  # <-- pass options to shape the prompt/UX
-            # )
-            # s["followup"] = {"question": q, "field_name": field, "options": top_opts}
-            # s.setdefault("resolver_candidates", {})[field] = cands
-            # save_session(session_id, s)
-            # add_message(session_id, "assistant", q, field)
-            # s = get_session(session_id) or s
-            # return _make_api_response(s)
-
-        # res = resolve_field_from_message(field, inp.user_message)
-        # value = res.get("value")
-
-        # if value is not None:
-        #     rf: Dict[str, Optional[List[str]]] = s.get("required_fields") or {}
-        #     rf[field] = [value]
-        #     s["required_fields"] = rf
-        #     save_session(session_id, s)
-        #     s = get_session(session_id) or s
-        # else:
-        #     q = generate_followup_question(field_name=field, intent=s.get("last_intent", {}), session=s)
-        #     s["followup"] = {"question": q, "field_name": field, "options": None}
-        #     save_session(session_id, s)
-        #     add_message(session_id, "assistant", q, field)
-        #     s = get_session(session_id) or s
-        #     return _make_api_response(s)
-
-        # after filling current field, check missing
+        # ---- Check next missing / finalize ----
         intent_obj = (s.get("last_intent") or {}).get("intent") or {}
         req_expr = intent_obj.get("required_fields") or []
         missing = _next_missing_field(s, req_expr)
@@ -245,8 +252,15 @@ def turn(inp: TurnInput):
             s["followup"] = None
             save_session(session_id, s)
             s = get_session(session_id) or s
+
             _run_db_filter_and_save(session_id, s)
-            _run_final_answer_and_save(session_id, s)
+
+            incentive_q = _get_active_question(s, "incentive_lookup", inp.user_message)
+            _run_final_answer_and_save(session_id, s, override_message=incentive_q)
+
+            s = get_session(session_id) or s
+            s["last_path"] = "incentive_lookup"
+            save_session(session_id, s)
             s = get_session(session_id) or s
             return _make_api_response(s)
 
@@ -260,22 +274,57 @@ def turn(inp: TurnInput):
         s["followup"] = {"question": q, "field_name": missing, "options": options}
         save_session(session_id, s)
         add_message(session_id, "assistant", q, missing)
+
         s = get_session(session_id) or s
         return _make_api_response(s)
 
-    # ---- TEXT TURN ----------------------------------------------------------
-    add_message(session_id, "user", inp.user_message, _pick_field_name(inp))
+    # ---------------- TEXT TURN ----------------
+    _append_user_message()
     s = get_session(session_id) or s
 
-    # Continuation: answer from existing last_result without re-deriving intent
-    if s.get("last_result"):
+    # ---- Route FIRST (prevents continuation from stealing doc_qa turns) ----
+    try:
+        r = route_message(inp.user_message, s)
+        s["last_route_decision"] = r
+        save_session(session_id, s)
+        s = get_session(session_id) or s
+
+        # Remember the active question for chosen route
+        s = _set_active_question(s, r["route"], inp.user_message)
+        save_session(session_id, s)
+        s = get_session(session_id) or s
+
+        if r["route"] == "doc_qa":
+            s = _docqa_turn(inp.user_message, s)
+            s["last_path"] = "doc_qa"
+            save_session(session_id, s)
+            s = get_session(session_id) or s
+            return _make_api_response(s)
+        # else: incentive flow continues below
+    except Exception:
+        # router failed -> treat as incentive flow
+        pass
+
+    # ---- Continuation (only meaningful for incentive here) ----
+    if s.get("last_result") or s.get("last_docs"):
         cont = detect_continuation(inp.user_message, s)
         if cont.get("is_continuation"):
-            _run_final_answer_and_save(session_id, s, override_message=inp.user_message)
+            if s.get("last_path") == "doc_qa":
+                s = _docqa_turn(inp.user_message, s)
+                s["last_path"] = "doc_qa"
+                save_session(session_id, s)
+                s = get_session(session_id) or s
+                return _make_api_response(s)
+            # default: incentive continuation
+            incentive_q = _get_active_question(s, "incentive_lookup", inp.user_message)
+            _run_final_answer_and_save(session_id, s, override_message=incentive_q)
+            s = get_session(session_id) or s
+            s["last_path"] = "incentive_lookup"
+            save_session(session_id, s)
             s = get_session(session_id) or s
             return _make_api_response(s)
 
-    # Fresh intent detection pipeline
+    # ---- Incentive fresh intent detection pipeline ----
     result = app_graph.invoke({"session_id": session_id, "text": inp.user_message})
 
     s = get_session(session_id) or s
@@ -316,12 +365,19 @@ def turn(inp: TurnInput):
         s["followup"] = None
         save_session(session_id, s)
         s = get_session(session_id) or s
+
         _run_db_filter_and_save(session_id, s)
-        _run_final_answer_and_save(session_id, s)
+
+        incentive_q = _get_active_question(s, "incentive_lookup", inp.user_message)
+        _run_final_answer_and_save(session_id, s, override_message=incentive_q)
+
+        s = get_session(session_id) or s
+        s["last_path"] = "incentive_lookup"
+        save_session(session_id, s)
         s = get_session(session_id) or s
         return _make_api_response(s)
 
-    # Ask next missing
+    # ---- Ask next missing field ----
     missing = _next_missing_field(s, req_expr)
     options = None
     if missing in (s.get("candidates") or {}):
