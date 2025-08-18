@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Literal, List, Optional
 from langchain_openai import ChatOpenAI
+import re  # <-- add
 
 Route = Literal["incentive_lookup", "doc_qa"]
 
@@ -39,16 +40,57 @@ def _summarize_session(session: Optional[Dict[str, Any]]) -> str:
     tail = _tail_messages(s, n=6)
 
     summary = {
-        "last_path": last_path,                 # "doc_qa" | "incentive_lookup" | ""
-        "intent_topic": topic,                  # e.g., "incentive_lookup_by_market"
-        "picked_set": picked,                   # order chosen from intent rule
-        "filled_fields": filled,                # already known selectors
-        "pending_followup_field": followup,     # expecting this next
-        "have_docs_context": have_docs,         # doc_qa ran previously
-        "have_table_rows": have_rows,           # incentive filter ran previously
-        "recent_messages": tail,                # last few chat turns
+        "last_path": last_path,
+        "intent_topic": topic,
+        "picked_set": picked,
+        "filled_fields": filled,
+        "pending_followup_field": followup,
+        "have_docs_context": have_docs,
+        "have_table_rows": have_rows,
+        "recent_messages": tail,
     }
     return json.dumps(summary, ensure_ascii=False)
+
+# -------------------------
+# Deterministic data guard (pre-LLM)
+# -------------------------
+_REQ_HINTS = re.compile(
+    r"(?i)\b(requirement|requirements|activity requirement|activities|modules?|agenda|scope)\b"
+)
+
+def _has_activity_requirements(rows: Any) -> bool:
+    if not rows or not isinstance(rows, list):
+        return False
+    for r in rows:
+        if isinstance(r, dict) and (r.get("activity_requirement") or "").strip():
+            return True
+    return False
+
+def _data_guard_route(user_message: str, session: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Hard rule: if an engagement is already resolved (rows exist) and activity_requirement
+    is present in dataset, and the user asks about requirements/agenda/modules/scope,
+    we must serve from dataset => incentive_lookup.
+    """
+    s = session or {}
+    rows = s.get("last_result")
+    if _REQ_HINTS.search(user_message or "") and _has_activity_requirements(rows):
+        return {
+            "route": "incentive_lookup",
+            "by": "guard",
+            "scores": {"confidence": 0.99, "why": "Engagement resolved with activity_requirement in dataset"}
+        }
+
+    # If there is a pending follow-up for a selector (typical lookup flow), prefer incentive_lookup.
+    pending = (s.get("followup") or {}).get("field_name") or ""
+    if pending in {"name", "workload", "incentive_type", "country", "segment", "market"}:
+        return {
+            "route": "incentive_lookup",
+            "by": "guard",
+            "scores": {"confidence": 0.85, "why": f"Pending selector '{pending}' implies incentive lookup"}
+        }
+
+    return None  # let LLM decide
 
 # -------------------------
 # LLM-only Router (context-aware)
@@ -57,10 +99,11 @@ _ROUTER_SYSTEM = """You are a deterministic ROUTER. Decide which single route be
 using both the new text and the CONVERSATION_CONTEXT.
 
 ROUTES
-- "incentive_lookup": engagements/workshops and business terms (funding, incentives, payouts, rates/%, caps, eligibility/qualification, segments, Market A|B|C, CSP transaction; pre/post sales when asking about money/eligibility).
+- "incentive_lookup": engagements/workshops and business terms (funding, incentives, payouts, rates/%, caps, eligibility/qualification, segments, Market A|B|C, CSP transaction; pre/post sales when asking about money/eligibility; ALSO when the dataset already has the requested activity details for a resolved engagement).
 - "doc_qa": guides/process/MCI policies, POE/deliverables/artifacts/templates/evidence, where-to-submit, timelines, SLA/TAT, approvals/exceptions.
 
 CONTEXT RULES
+- DATASET-FIRST: If have_table_rows is true AND the engagement’s dataset includes the requested detail (e.g., activity_requirement) AND the user asks for requirements/agenda/modules/scope → choose "incentive_lookup".
 - If last_path is "doc_qa" AND the new message is a short continuation (e.g., "POE", "template", "where to submit"), keep doc_qa.
 - If there is a pending_followup_field, prefer the route implied by that field (usually incentive_lookup).
 - If both themes appear, apply:
@@ -132,12 +175,11 @@ def _llm_route(user_message: str, session: Optional[Dict[str, Any]]) -> Dict[str
 # -------------------------
 def route_message(user_message: str, session: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Decide route for this turn (LLM-only, conversation-aware).
-    Returns:
-      {
-        "route": "incentive_lookup" | "doc_qa",
-        "by": "llm",
-        "scores": {"confidence": float, "why": str}
-      }
+    Decide route for this turn.
+    1) Deterministic data-guard
+    2) Otherwise LLM router
     """
+    guard = _data_guard_route(user_message, session)
+    if guard:
+        return guard
     return _llm_route(user_message, session)
